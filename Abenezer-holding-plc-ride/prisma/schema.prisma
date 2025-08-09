@@ -1,0 +1,181 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String?
+  role      UserRole @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Passenger {
+  id                   String          @id @default(cuid())
+  name                 String
+  isDirect             Boolean?        @default(false)
+  estimatedDurationMin Int?
+  earliestPickupTime   DateTime?       @db.Timestamptz(6)
+  latestPickupTime     DateTime?       @db.Timestamptz(6)
+  earliestDropoffTime  DateTime?       @db.Timestamptz(6)
+  latestDropoffTime    DateTime?       @db.Timestamptz(6)
+  pickupStreetNumber   String?
+  pickupStreet         String?
+  pickupCity           String?
+  pickupZip            String?
+  dropoffStreetNumber  String?
+  dropoffStreet        String?
+  dropoffCity          String?
+  dropoffZip           String?
+  pickupLat            Float
+  pickupLng            Float
+  dropoffLat           Float
+  dropoffLng           Float
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  assignedDriverId     String?
+  groupSize            Int             @default(1)
+  status               PassengerStatus @default(UNASSIGNED)
+  assignments          Assignment[]    @relation("PassengerAssignmentHistory")
+  assignedDriver       Driver?         @relation("DriverToPassengers", fields: [assignedDriverId], references: [id])
+}
+
+model Driver {
+  id                             String       @id @default(cuid())
+  createdAt                      DateTime     @default(now())
+  updatedAt                      DateTime     @updatedAt
+  availabilityEnd                DateTime?    @db.Timestamptz(6)
+  availabilityStart              DateTime?    @db.Timestamptz(6)
+  capacity                       Int?
+  currentLat                     Float?
+  currentLng                     Float?
+  lastDropoffLat                 Float?
+  lastDropoffLng                 Float?
+  lastDropoffTimestamp           DateTime?
+  status                         DriverStatus @default(IDLE)
+  currentAssignmentId            String?      @unique
+  currentTripId                  String?      @unique
+  mdtUsername                    String       @unique
+  city                           String?
+  dateOfBirth                    DateTime?
+  deletedAt                      DateTime?
+  driverLicenseExpiration        DateTime?
+  driverLicenseNumber            String?
+  driverLicenseState             String?
+  emergencyContactName           String?
+  emergencyContactNote           String?
+  emergencyContactPhone          String?
+  emergencyContactPhoneExtension String?
+  emergencyContactRelation       String?
+  employeeNumber                 String?
+  firstName                      String
+  hireDate                       DateTime?
+  lastName                       String
+  middleInitial                  String?
+  note                           String?
+  passwordHash                   String
+  phone                          String?
+  phoneExtension                 String?
+  provider                       String?
+  seniority                      String?
+  skill                          String?
+  state                          String?
+  street                         String?
+  streetNumber                   String?
+  terminationDate                DateTime?
+  vehicle                        String?
+  zipCode                        String?
+  assignments                    Assignment[] @relation("DriverAssignmentHistory")
+  currentTrip                    Trip?        @relation("CurrentTrip", fields: [currentTripId], references: [id])
+  assignedPassengers             Passenger[]  @relation("DriverToPassengers")
+  trips                          Trip[]       @relation("DriverTrips")
+}
+
+model Assignment {
+  id                   String           @id @default(cuid())
+  driverId             String
+  passengerId          String
+  assignedAt           DateTime         @default(now())
+  actualDropoffTime    DateTime?        @db.Timestamptz(6)
+  actualPickupTime     DateTime?        @db.Timestamptz(6)
+  createdAt            DateTime         @default(now())
+  estimatedDropoffTime DateTime?        @db.Timestamptz(6)
+  estimatedPickupTime  DateTime?        @db.Timestamptz(6)
+  status               AssignmentStatus @default(PENDING)
+  updatedAt            DateTime         @updatedAt
+  nextAssignmentId     String?          @unique
+  tripId               String?
+  driver               Driver           @relation("DriverAssignmentHistory", fields: [driverId], references: [id])
+  nextAssignment       Assignment?      @relation("ChainedAssignments", fields: [nextAssignmentId], references: [id])
+  previousAssignment   Assignment?      @relation("ChainedAssignments")
+  passenger            Passenger        @relation("PassengerAssignmentHistory", fields: [passengerId], references: [id])
+  trip                 Trip?            @relation(fields: [tripId], references: [id])
+
+  @@unique([driverId, passengerId, assignedAt])
+}
+
+model Trip {
+  id                   String       @id @default(cuid())
+  driverId             String
+  status               TripStatus   @default(ACTIVE)
+  orderedWaypointsJson String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  assignments          Assignment[]
+  currentDriver        Driver?      @relation("CurrentTrip")
+  driver               Driver       @relation("DriverTrips", fields: [driverId], references: [id])
+}
+
+enum TripStatus {
+  ACTIVE
+  COMPLETED
+}
+
+enum PassengerStatus {
+  UNASSIGNED
+  ASSIGNED
+  PICKED_UP
+  DROPPED_OFF
+  CANCELLED
+}
+
+enum DriverStatus {
+  IDLE
+  EN_ROUTE_TO_PICKUP
+  EN_ROUTE_TO_DROPOFF
+  WAITING_POST_DROPOFF
+  OFFLINE
+  BUSY
+}
+
+enum AssignmentStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED_BY_PASSENGER
+  CANCELLED_BY_DRIVER
+  CANCELLED_BY_SYSTEM
+  FAILED
+  SCHEDULED
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  BANNED
+}

@@ -1,0 +1,349 @@
+import { describe, it, expect, beforeEach, jest } from '@jest/globals';
+import { AssignmentService } from '../services/assign';
+import { Driver, Passenger, DriverStatus, PassengerStatus } from '@prisma/client';
+
+// Mock the dependencies
+jest.mock('@utils/prisma', () => ({
+  prisma: {
+    $transaction: jest.fn(),
+    assignment: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
+    driver: {
+      findMany: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    passenger: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    trip: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
+  },
+}));
+
+jest.mock('../services/driver', () => ({
+  driverService: {
+    getActiveDrivers: jest.fn(),
+    updateDriverStatus: jest.fn(),
+  },
+}));
+
+jest.mock('../services/passengers', () => ({
+  passengerService: {
+    getUnassignedPassengers: jest.fn(),
+  },
+}));
+
+jest.mock('../services/googleMap', () => ({
+  googleMapsService: {
+    getDistanceMatrix: jest.fn(),
+    getDirections: jest.fn(),
+  },
+}));
+
+jest.mock('@utils/helpers.js', () => ({
+  isLocationNearPolyline: jest.fn().mockReturnValue(true),
+}));
+
+describe('AssignmentService', () => {
+  let assignmentService: AssignmentService;
+  let mockDriverService: any;
+  let mockPassengerService: any;
+  let mockGoogleMapsService: any;
+
+  // Sample data for testing
+  const createMockDriver = (id: string, lat: number, lng: number): Driver => ({
+    id,
+    name: `Driver ${id}`,
+    email: `driver${id}@test.com`,
+    phoneNumber: `123456789${id}`,
+    status: DriverStatus.IDLE,
+    capacity: 4,
+    currentLat: lat,
+    currentLng: lng,
+    lastDropoffLat: lat,
+    lastDropoffLng: lng,
+    lastDropoffTimestamp: new Date('2025-01-01T08:00:00Z'),
+    currentAssignmentId: null,
+    currentTripId: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  const createMockPassenger = (
+    id: string,
+    pickupLat: number,
+    pickupLng: number,
+    dropoffLat: number,
+    dropoffLng: number,
+    earliestPickup: string,
+    latestPickup: string
+  ): Passenger => ({
+    id,
+    name: `Passenger ${id}`,
+    email: `passenger${id}@test.com`,
+    phoneNumber: `987654321${id}`,
+    status: PassengerStatus.UNASSIGNED,
+    pickupLat,
+    pickupLng,
+    dropoffLat,
+    dropoffLng,
+    earliestPickupTime: new Date(`2025-01-02T${earliestPickup}:00Z`),
+    latestPickupTime: new Date(`2025-01-02T${latestPickup}:00Z`),
+    estimatedDurationMin: 20,
+    groupSize: 1,
+    assignedDriverId: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    
+    // Mock the services
+    mockDriverService = require('../services/driver').driverService;
+    mockPassengerService = require('../services/passengers').passengerService;
+    mockGoogleMapsService = require('../services/googleMap').googleMapsService;
+
+    assignmentService = new AssignmentService();
+    
+    // Inject mocked services
+    (assignmentService as any).ds = mockDriverService;
+    (assignmentService as any).ps = mockPassengerService;
+    (assignmentService as any).gms = mockGoogleMapsService;
+  });
+
+  describe('runAssignmentCycle', () => {
+    it('should default to tomorrow when no date is provided', async () => {
+      // Mock empty arrays to avoid actual processing
+      mockDriverService.getActiveDrivers.mockResolvedValue([]);
+      mockPassengerService.getUnassignedPassengers.mockResolvedValue([]);
+
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+      
+      await assignmentService.runAssignmentCycle();
+
+      // Verify that the log message contains tomorrow's date
+      const logCall = consoleSpy.mock.calls.find(call => 
+        call[0]?.includes('Starting Final Master Scheduling Cycle for')
+      );
+      
+      expect(logCall).toBeDefined();
+      
+      // Extract date from log message and verify it's tomorrow
+      const logMessage = logCall![0];
+      const dateMatch = logMessage.match(/for (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)/);
+      expect(dateMatch).toBeDefined();
+      
+      const scheduledDate = new Date(dateMatch![1]);
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(0, 0, 0, 0);
+      
+      expect(scheduledDate.toDateString()).toBe(tomorrow.toDateString());
+      
+      consoleSpy.mockRestore();
+    });
+
+    it('should use provided date when specified', async () => {
+      // Mock empty arrays to avoid actual processing
+      mockDriverService.getActiveDrivers.mockResolvedValue([]);
+      mockPassengerService.getUnassignedPassengers.mockResolvedValue([]);
+
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+      const customDate = new Date('2025-12-25T00:00:00.000Z');
+      
+      await assignmentService.runAssignmentCycle(customDate);
+
+      // Verify that the log message contains the custom date
+      const logCall = consoleSpy.mock.calls.find(call => 
+        call[0]?.includes('Starting Final Master Scheduling Cycle for')
+      );
+      
+      expect(logCall).toBeDefined();
+      expect(logCall![0]).toContain('2025-12-25T00:00:00.000Z');
+      
+      consoleSpy.mockRestore();
+    });
+
+    it('should respect passenger pickup time windows during assignment', async () => {
+      // Create test data
+      const driver1 = createMockDriver('D1', 40.7128, -74.0060); // NYC coordinates
+      const passenger1 = createMockPassenger('P1', 40.7589, -73.9851, 40.6892, -74.0445, '08:15', '09:00'); // Times: 8:15 AM - 9:00 AM
+      const passenger2 = createMockPassenger('P2', 40.7505, -73.9934, 40.7831, -73.9712, '14:30', '15:15'); // Times: 2:30 PM - 3:15 PM
+
+      // Mock service responses
+      mockDriverService.getActiveDrivers.mockResolvedValue([driver1]);
+      mockPassengerService.getUnassignedPassengers.mockResolvedValue([passenger1, passenger2]);
+
+      // Mock Google Maps API responses
+      mockGoogleMapsService.getDistanceMatrix.mockImplementation(({ origins, destinations }) => {
+        // Return different travel times based on destination
+        const dest = destinations[0];
+        if (Math.abs(dest.lat - passenger1.pickupLat) < 0.01) {
+          // 10 minutes to passenger1
+          return Promise.resolve([[{ status: 'OK', duration: { value: 600 }, distance: { value: 5000 } }]]);
+        } else {
+          // 5 minutes to passenger2
+          return Promise.resolve([[{ status: 'OK', duration: { value: 300 }, distance: { value: 3000 } }]]);
+        }
+      });
+
+      // Mock database transaction
+      const mockPrisma = require('@utils/prisma').prisma;
+      mockPrisma.$transaction.mockImplementation(async (callback: any) => {
+        return await callback({
+          passenger: {
+            updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          },
+          assignment: {
+            create: jest.fn().mockResolvedValue({
+              id: 'A1',
+              driverId: driver1.id,
+              passengerId: passenger1.id,
+              estimatedPickupTime: new Date('2025-01-02T08:25:00.000Z'),
+              estimatedDropoffTime: new Date('2025-01-02T08:45:00.000Z'),
+              status: 'CONFIRMED',
+            }),
+          },
+          driver: {
+            update: jest.fn(),
+            updateMany: jest.fn(),
+          },
+        });
+      });
+
+      // Use a specific target date (tomorrow)
+      const targetDate = new Date('2025-01-02T00:00:00.000Z');
+      
+      await assignmentService.runAssignmentCycle(targetDate);
+
+      // Verify that the assignment respects pickup time windows
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      
+      // Extract the assignment data from the transaction call
+      const transactionCallback = mockPrisma.$transaction.mock.calls[0][0];
+      const mockTx = {
+        passenger: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        assignment: { create: jest.fn().mockResolvedValue({ id: 'TEST' }) },
+        driver: { update: jest.fn(), updateMany: jest.fn() },
+      };
+      
+      await transactionCallback(mockTx);
+      
+      // Verify assignment was created
+      expect(mockTx.assignment.create).toHaveBeenCalled();
+    });
+
+    it('should handle fallback assignment with proper pickup time calculation', async () => {
+      const driver1 = createMockDriver('D1', 40.7128, -74.0060);
+      const passenger1 = createMockPassenger('P1', 40.7589, -73.9851, 40.6892, -74.0445, '15:15', '16:00');
+
+      // Mock that passenger remains unassigned after initial scheduling
+      mockDriverService.getActiveDrivers.mockResolvedValue([driver1]);
+      mockPassengerService.getUnassignedPassengers
+        .mockResolvedValueOnce([passenger1])  // Initial call
+        .mockResolvedValueOnce([passenger1]); // Fallback call
+
+      // Mock Google Maps response for fallback
+      mockGoogleMapsService.getDistanceMatrix.mockResolvedValue([
+        [{ status: 'OK', duration: { value: 900 }, distance: { value: 8000 } }] // 15 minutes travel
+      ]);
+
+      // Mock driver state query
+      const mockPrisma = require('@utils/prisma').prisma;
+      mockPrisma.driver.findMany.mockResolvedValue([{
+        ...driver1,
+        assignments: [],
+        trips: [],
+      }]);
+
+      // Mock successful assignment
+      const mockAssignBestMatch = jest.spyOn(assignmentService as any, 'assignBestMatch')
+        .mockResolvedValue({ id: 'FALLBACK_ASSIGNMENT' });
+
+      const targetDate = new Date('2025-01-02T00:00:00.000Z');
+      await assignmentService.runAssignmentCycle(targetDate);
+
+      // Verify fallback assignment was called with proper structure
+      expect(mockAssignBestMatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          passenger: passenger1,
+          driver: expect.objectContaining({ id: driver1.id }),
+          score: expect.any(Number),
+          travelTimeToPickupSeconds: 900,
+          estimatedPickupTime: expect.any(Date),
+          passengerRideDurationSeconds: 1200, // 20 minutes default
+        })
+      );
+
+      // Verify pickup time is within passenger's window
+      const assignmentCall = mockAssignBestMatch.mock.calls[0][0];
+      const estimatedPickupTime = assignmentCall.estimatedPickupTime;
+      
+      // Should be scheduled for the target date, within passenger's time window
+      expect(estimatedPickupTime.toISOString()).toMatch(/^2025-01-02T15:/);
+      expect(estimatedPickupTime.getTime()).toBeGreaterThanOrEqual(
+        new Date('2025-01-02T15:15:00.000Z').getTime()
+      );
+      expect(estimatedPickupTime.getTime()).toBeLessThanOrEqual(
+        new Date('2025-01-02T16:00:00.000Z').getTime()
+      );
+
+      mockAssignBestMatch.mockRestore();
+    });
+
+    it('should skip assignments where driver cannot reach passenger in time', async () => {
+      const driver1 = createMockDriver('D1', 40.7128, -74.0060);
+      // Passenger with very early pickup window
+      const passenger1 = createMockPassenger('P1', 40.7589, -73.9851, 40.6892, -74.0445, '06:00', '06:30');
+
+      mockDriverService.getActiveDrivers.mockResolvedValue([driver1]);
+      mockPassengerService.getUnassignedPassengers.mockResolvedValue([passenger1]);
+
+      // Mock long travel time (2 hours) that makes pickup impossible
+      mockGoogleMapsService.getDistanceMatrix.mockResolvedValue([
+        [{ status: 'OK', duration: { value: 7200 }, distance: { value: 100000 } }]
+      ]);
+
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+      const targetDate = new Date('2025-01-02T00:00:00.000Z');
+      
+      await assignmentService.runAssignmentCycle(targetDate);
+
+      // Should log that no passengers remain unassigned (because none were assigned)
+      const finalLogCall = consoleSpy.mock.calls.find(call => 
+        call[0]?.includes('passengers remain unassigned')
+      );
+      expect(finalLogCall).toBeDefined();
+      expect(finalLogCall![0]).toContain('1 passengers remain unassigned');
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('pickup time window validation', () => {
+    it('should correctly calculate pickup times across different time zones and dates', () => {
+      // Test the time calculation logic separately
+      const targetDate = new Date('2025-01-02T00:00:00.000Z'); // Jan 2nd, midnight UTC
+      const passengerEarliest = new Date('2025-01-01T15:30:00.000Z'); // 3:30 PM on Jan 1st
+
+      // Simulate the calculation from the fallback logic
+      const passengerEarliestPickup = new Date(
+        targetDate.getTime() + 
+        (passengerEarliest.getTime() - new Date(passengerEarliest).setHours(0, 0, 0, 0))
+      );
+
+      // Should result in 3:30 PM on the target date (Jan 2nd)
+      expect(passengerEarliestPickup.toISOString()).toBe('2025-01-02T15:30:00.000Z');
+    });
+  });
+});
