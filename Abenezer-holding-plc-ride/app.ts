@@ -170,3 +170,4 @@ configureSocket(io);
 // }
 
 // export { app, server };
+export { app, server };
