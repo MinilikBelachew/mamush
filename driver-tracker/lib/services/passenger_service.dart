@@ -4,6 +4,7 @@ import '../models/passenger.dart';
 
 class PassengerService {
   static Future<List<Passenger>> fetchPassengersForDriver(String driverId) async {
+    // Uses localhost for adb reverse; change to 10.0.2.2 if not reversing
     final url = 'http://localhost:3000/api/v1/assignment/driversAssignment/$driverId';
     final response = await http.get(Uri.parse(url));
 

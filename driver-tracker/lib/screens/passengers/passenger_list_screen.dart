@@ -6,6 +6,7 @@ import 'dart:ui'; // for ImageFilter
 
 import '../../models/passenger.dart';
 import '../../services/passenger_service.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 import '../../screens/passengers/passenger_detail_screen.dart';
 
 // -------------- Passenger List Page -------------
@@ -21,11 +22,13 @@ class _PassengerListPageState extends State<PassengerListPage> {
   List<Passenger> _passengers = [];
   bool _loading = true;
   String? _error;
+  IO.Socket? _socket;
 
   @override
   void initState() {
     super.initState();
     _loadPassengers();
+    _initSocket();
   }
 
   Future<void> _loadPassengers() async {
@@ -46,6 +49,32 @@ class _PassengerListPageState extends State<PassengerListPage> {
         _loading = false;
       });
     }
+  }
+
+  void _initSocket() {
+    // Keep URL consistent with app main (localhost if adb reverse is used)
+    _socket = IO.io('http://localhost:3000', {
+      'transports': ['websocket'],
+      'autoConnect': true,
+    });
+
+    _socket!.onConnect((_) {
+      _socket!.emit('authenticate', {
+        'userId': widget.driverId,
+        'type': 'driver',
+      });
+    });
+
+    _socket!.on('assignments-updated', (_) async {
+      // Re-fetch on assignment updates
+      await _loadPassengers();
+    });
+  }
+
+  @override
+  void dispose() {
+    _socket?.dispose();
+    super.dispose();
   }
 
   @override

@@ -14,8 +14,10 @@ interface DriverLocation {
 
 // driverLocations now uses strings for keys
 const driverLocations: Record<string, DriverLocation> = {};
+let ioRef: Server | null = null;
 
 export function configureSocket(io: Server) {
+  ioRef = io;
   io.on("connection", (socket: Socket) => {
     console.log("Socket connected:", socket.id);
 
@@ -66,6 +68,11 @@ export function configureSocket(io: Server) {
 }
 
 export { driverLocations };
+
+export function notifyDriverAssignmentsUpdated(driverId: string, payload?: any) {
+  if (!ioRef) return;
+  ioRef.to(driverId).emit('assignments-updated', payload ?? {});
+}
 
 
 

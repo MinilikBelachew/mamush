@@ -10,6 +10,7 @@ import {
   Passenger,
 } from '@prisma/client';
 import { prisma } from '@utils/prisma.js';
+import { notifyDriverAssignmentsUpdated } from '../socket/socket.js';
 import { runAssignmentCycle } from 'services/test.js';
 import { DateTime } from 'luxon';
 interface Location {
@@ -701,7 +702,19 @@ export const assignSelectedDriver = async (req: Request, res: Response) => {
       }),
     ]);
 
-    return res
+  // Notify the assigned driver in real time
+  try {
+    notifyDriverAssignmentsUpdated(driverId, {
+      assignmentId: assignment.id,
+      passengerId: passenger.id,
+      driverId,
+      estimatedPickupTime: assignment.estimatedPickupTime,
+    });
+  } catch (e) {
+    console.warn('Failed to notify driver via socket:', (e as Error).message);
+  }
+
+  return res
       .status(200)
       .json({ message: 'Driver assigned successfully.', assignment });
   } catch (error) {
