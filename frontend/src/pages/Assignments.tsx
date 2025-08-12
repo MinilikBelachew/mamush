@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import MapGL, { Marker, Popup, Layer, NavigationControl } from "react-map-gl";
 import { MapboxSource } from "@/components/MapboxSource";
@@ -89,6 +89,238 @@ const Assignments = () => {
     zoom: 10,
   });
   const [mapError, setMapError] = useState(null);
+  const mapRef = useRef<any>(null);
+
+  // Active passenger pickup -> dropoff road route (Mapbox directions)
+  const [activePickupDropoffRoute, setActivePickupDropoffRoute] = useState<any>(null);
+  // Active driver -> pickup road route
+  const [activeDriverToPickupRoute, setActiveDriverToPickupRoute] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchActiveRoute = async () => {
+      if (!activeAssignmentId || !assignment) {
+        setActivePickupDropoffRoute(null);
+        return;
+      }
+      const active = assignment.find((a: any) => String(a.id) === String(activeAssignmentId));
+      if (!active || !active.passenger) {
+        setActivePickupDropoffRoute(null);
+        return;
+      }
+      const pickupLng = active.passenger.pickupLng ?? 0;
+      const pickupLat = active.passenger.pickupLat ?? 0;
+      const dropoffLng = active.passenger.dropoffLng ?? 0;
+      const dropoffLat = active.passenger.dropoffLat ?? 0;
+      const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${pickupLng},${pickupLat};${dropoffLng},${dropoffLat}?geometries=geojson&overview=full&access_token=${import.meta.env.VITE_MAPBOX_API_KEY}`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          setActivePickupDropoffRoute(null);
+          return;
+        }
+        const data = await response.json();
+        if (data.routes && data.routes[0]?.geometry) {
+          const feature = {
+            type: "Feature",
+            properties: { assignmentId: String(active.id) },
+            geometry: data.routes[0].geometry,
+          };
+          setActivePickupDropoffRoute({ type: "FeatureCollection", features: [feature] });
+        } else {
+          setActivePickupDropoffRoute(null);
+        }
+      } catch (e) {
+        setActivePickupDropoffRoute(null);
+      }
+    };
+
+    fetchActiveRoute();
+  }, [activeAssignmentId, assignment]);
+
+  // Auto-fit map to active route bounds
+  useEffect(() => {
+    if (!mapRef.current || !activePickupDropoffRoute) return;
+    try {
+      const feature = activePickupDropoffRoute.features?.[0];
+      const coords: [number, number][] = feature?.geometry?.coordinates || [];
+      if (!coords || coords.length < 2) return;
+      // Compute bounds
+      let minLng = coords[0][0];
+      let minLat = coords[0][1];
+      let maxLng = coords[0][0];
+      let maxLat = coords[0][1];
+      for (const [lng, lat] of coords) {
+        if (lng < minLng) minLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lng > maxLng) maxLng = lng;
+        if (lat > maxLat) maxLat = lat;
+      }
+      if (minLng === maxLng && minLat === maxLat) return;
+      mapRef.current.fitBounds(
+        [
+          [minLng, minLat],
+          [maxLng, maxLat],
+        ],
+        { padding: 80, duration: 800 }
+      );
+    } catch {}
+  }, [activePickupDropoffRoute]);
+
+  // Fetch and render active driver -> pickup route
+  useEffect(() => {
+    const fetchDriverToPickup = async () => {
+      if (!activeAssignmentId || !assignment) {
+        setActiveDriverToPickupRoute(null);
+        return;
+      }
+      const active = assignment.find((a: any) => String(a.id) === String(activeAssignmentId));
+      if (!active || !active.passenger || !active.driver) {
+        setActiveDriverToPickupRoute(null);
+        return;
+      }
+      const originLng = active.driver.currentLng ?? 0;
+      const originLat = active.driver.currentLat ?? 0;
+      const pickupLng = active.passenger.pickupLng ?? 0;
+      const pickupLat = active.passenger.pickupLat ?? 0;
+      // Basic guard against invalid zeros
+      if ((Math.abs(originLng) < 0.001 && Math.abs(originLat) < 0.001) || (Math.abs(pickupLng) < 0.001 && Math.abs(pickupLat) < 0.001)) {
+        setActiveDriverToPickupRoute(null);
+        return;
+      }
+      const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${originLng},${originLat};${pickupLng},${pickupLat}?geometries=geojson&overview=full&access_token=${import.meta.env.VITE_MAPBOX_API_KEY}`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          setActiveDriverToPickupRoute(null);
+          return;
+        }
+        const data = await response.json();
+        if (data.routes && data.routes[0]?.geometry) {
+          const feature = {
+            type: "Feature",
+            properties: { assignmentId: String(active.id) },
+            geometry: data.routes[0].geometry,
+          };
+          setActiveDriverToPickupRoute({ type: "FeatureCollection", features: [feature] });
+        } else {
+          setActiveDriverToPickupRoute(null);
+        }
+      } catch (e) {
+        setActiveDriverToPickupRoute(null);
+      }
+    };
+
+    fetchDriverToPickup();
+  }, [activeAssignmentId, assignment]);
+
+  useEffect(() => {
+    const mapObj: any = mapRef.current?.getMap ? mapRef.current.getMap() : mapRef.current;
+    if (!mapObj) return;
+
+    const sourceId = "active-driver-pickup";
+    const layerId = "active-driver-pickup-layer";
+
+    const removeIfExists = () => {
+      try { if (mapObj.getLayer(layerId)) mapObj.removeLayer(layerId); } catch {}
+      try { if (mapObj.getSource(sourceId)) mapObj.removeSource(sourceId); } catch {}
+    };
+
+    if (!activeDriverToPickupRoute) {
+      removeIfExists();
+      return;
+    }
+
+    const addOrUpdate = () => {
+      try {
+        if (mapObj.getSource(sourceId)) {
+          const src: any = mapObj.getSource(sourceId);
+          if (src && src.setData) src.setData(activeDriverToPickupRoute);
+        } else {
+          mapObj.addSource(sourceId, { type: "geojson", data: activeDriverToPickupRoute });
+        }
+        if (!mapObj.getLayer(layerId)) {
+          mapObj.addLayer({
+            id: layerId,
+            type: "line",
+            source: sourceId,
+            paint: {
+              "line-color": "#3b82f6", // blue
+              "line-width": 5,
+              "line-opacity": 0.95,
+            },
+          });
+        }
+      } catch (e) {
+        if (mapObj && mapObj.on) {
+          const handler = () => { try { addOrUpdate(); } finally { mapObj.off("styledata", handler); } };
+          mapObj.on("styledata", handler);
+        }
+      }
+    };
+
+    addOrUpdate();
+    return () => { removeIfExists(); };
+  }, [activeDriverToPickupRoute]);
+
+  // Manually render active route source/layer to avoid dev overlay prop injection issues
+  useEffect(() => {
+    const mapObj: any = mapRef.current?.getMap ? mapRef.current.getMap() : mapRef.current;
+    if (!mapObj) return;
+
+    const sourceId = "active-pickup-dropoff";
+    const layerId = "active-pickup-dropoff-layer";
+
+    const removeIfExists = () => {
+      try {
+        if (mapObj.getLayer(layerId)) mapObj.removeLayer(layerId);
+      } catch {}
+      try {
+        if (mapObj.getSource(sourceId)) mapObj.removeSource(sourceId);
+      } catch {}
+    };
+
+    if (!activePickupDropoffRoute) {
+      removeIfExists();
+      return;
+    }
+
+    const addOrUpdate = () => {
+      try {
+        if (mapObj.getSource(sourceId)) {
+          const src: any = mapObj.getSource(sourceId);
+          if (src && src.setData) src.setData(activePickupDropoffRoute);
+        } else {
+          mapObj.addSource(sourceId, { type: "geojson", data: activePickupDropoffRoute });
+        }
+        if (!mapObj.getLayer(layerId)) {
+          mapObj.addLayer({
+            id: layerId,
+            type: "line",
+            source: sourceId,
+            paint: {
+              "line-color": "#16a34a",
+              "line-width": 6,
+              "line-opacity": 0.85,
+            },
+          });
+        }
+      } catch (e) {
+        // Retry once when style is not yet loaded
+        if (mapObj && mapObj.on) {
+          const handler = () => {
+            try { addOrUpdate(); } finally { mapObj.off("styledata", handler); }
+          };
+          mapObj.on("styledata", handler);
+        }
+      }
+    };
+
+    addOrUpdate();
+
+    return () => {
+      removeIfExists();
+    };
+  }, [activePickupDropoffRoute]);
 
   // Handle responsive behavior
   useEffect(() => {
@@ -278,7 +510,7 @@ const Assignments = () => {
         // Add driver-to-pickup path as a simple LineString
         const driverToPickupLine = {
           type: "Feature",
-          properties: { assignmentId: assign.id },
+          properties: { assignmentId: String(assign.id) },
           geometry: {
             type: "LineString",
             coordinates: [
@@ -306,7 +538,7 @@ const Assignments = () => {
             const routeGeometry = data.routes[0].geometry;
             const feature = {
               type: "Feature",
-              properties: { assignmentId: assign.id },
+              properties: { assignmentId: String(assign.id) },
               geometry: routeGeometry,
             };
             assignmentRouteFeatures.push(feature);
@@ -790,6 +1022,7 @@ const Assignments = () => {
               initialViewState={viewport}
               mapboxAccessToken={import.meta.env.VITE_MAPBOX_API_KEY}
               onMove={(evt) => setViewport(evt.viewState)}
+              ref={mapRef}
               mapStyle="mapbox://styles/mapbox/streets-v11"
             projection={{ name: "globe" }}
               style={{ width: "100%", height: "100%" }}
@@ -799,8 +1032,22 @@ const Assignments = () => {
               </div>
               {assignment && (
                 <>
-                  {/* Draw all drivers' full routes as a colored line */}
-                  {showFullRoutes && driverFullRoutes.get("all") && (
+                  {/* Active passenger pickup -> dropoff road route */}
+                  {activePickupDropoffRoute && (
+                    <MapboxSource id="active-pickup-dropoff" type="geojson" data={activePickupDropoffRoute}>
+                      <Layer
+                        id="active-pickup-dropoff-layer"
+                        type="line"
+                        paint={{
+                          "line-color": "#16a34a",
+                          "line-width": 6,
+                          "line-opacity": 0.85,
+                        }}
+                      />
+                    </MapboxSource>
+                  )}
+                  {/* Draw all drivers' full routes as a colored line (hide when active selection) */}
+                  {!activeAssignmentId && showFullRoutes && driverFullRoutes.get("all") && (
                     <MapboxSource
                       id="driver-full-routes"
                       type="geojson"
@@ -832,6 +1079,7 @@ const Assignments = () => {
                       <Layer
                         id="assignment-routes-layer"
                         type="line"
+                        filter={activeAssignmentId ? ["==", ["get", "assignmentId"], String(activeAssignmentId)] : undefined}
                         paint={{
                           "line-color": "#4F46E5",
                           "line-width": 4,
@@ -850,6 +1098,7 @@ const Assignments = () => {
                       <Layer
                         id="driver-to-pickup-lines-layer"
                         type="line"
+                        filter={activeAssignmentId ? ["==", ["get", "assignmentId"], String(activeAssignmentId)] : undefined}
                         paint={{
                           "line-color": "#888",
                           "line-width": 3,
@@ -860,7 +1109,7 @@ const Assignments = () => {
                     </MapboxSource>
                   )}
 
-                  {assignment.map((assign) => {
+                  {(activeAssignmentId ? assignment.filter((a:any) => String(a.id) === String(activeAssignmentId)) : assignment).map((assign) => {
                     const { driver, passenger } = assign;
                     const color = getStatusColor(String(assign.status ?? ""));
                     const isActive = activeAssignmentId === String(assign.id);
