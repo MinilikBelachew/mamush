@@ -95,6 +95,8 @@ const Assignments = () => {
   const [activePickupDropoffRoute, setActivePickupDropoffRoute] = useState<any>(null);
   // Active driver -> pickup road route
   const [activeDriverToPickupRoute, setActiveDriverToPickupRoute] = useState<any>(null);
+  // Active driver's dynamic origin for marker (prev dropoff or current position)
+  const [activeDriverOrigin, setActiveDriverOrigin] = useState<[number, number] | null>(null);
 
   useEffect(() => {
     const fetchActiveRoute = async () => {
@@ -176,17 +178,38 @@ const Assignments = () => {
       const active = assignment.find((a: any) => String(a.id) === String(activeAssignmentId));
       if (!active || !active.passenger || !active.driver) {
         setActiveDriverToPickupRoute(null);
+        setActiveDriverOrigin(null);
         return;
       }
-      const originLng = active.driver.currentLng ?? 0;
-      const originLat = active.driver.currentLat ?? 0;
+
+      // Determine dynamic origin: previous dropoff of the same driver, else current driver location
+      const driverId = String(active.driverId ?? active.driver?.id ?? "unknown");
+      let originLng = active.driver.currentLng ?? 0;
+      let originLat = active.driver.currentLat ?? 0;
+      // Derive driver sequence from assignments to avoid TDZ on driverGroups
+      const driverList = (assignment as any[])
+        .filter((a) => String(a.driverId ?? a.driver?.id ?? "unknown") === driverId)
+        .sort((a, b) => new Date(a.estimatedPickupTime).getTime() - new Date(b.estimatedPickupTime).getTime());
+      const idx = driverList.findIndex((a: any) => String(a.id) === String(active.id));
+      if (idx > 0) {
+        const prev = driverList[idx - 1];
+        const prevDropLng = prev?.passenger?.dropoffLng;
+        const prevDropLat = prev?.passenger?.dropoffLat;
+        if (typeof prevDropLng === "number" && typeof prevDropLat === "number") {
+          originLng = prevDropLng;
+          originLat = prevDropLat;
+        }
+      }
+
       const pickupLng = active.passenger.pickupLng ?? 0;
       const pickupLat = active.passenger.pickupLat ?? 0;
       // Basic guard against invalid zeros
       if ((Math.abs(originLng) < 0.001 && Math.abs(originLat) < 0.001) || (Math.abs(pickupLng) < 0.001 && Math.abs(pickupLat) < 0.001)) {
         setActiveDriverToPickupRoute(null);
+        setActiveDriverOrigin(null);
         return;
       }
+      setActiveDriverOrigin([originLng, originLat]);
       const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${originLng},${originLat};${pickupLng},${pickupLat}?geometries=geojson&overview=full&access_token=${import.meta.env.VITE_MAPBOX_API_KEY}`;
       try {
         const response = await fetch(url);
@@ -1116,10 +1139,10 @@ const Assignments = () => {
 
                     return (
                       <React.Fragment key={assign.id}>
-                        {/* Driver Marker */}
+                        {/* Driver Marker (dynamic origin if active) */}
                         <Marker
-                          longitude={driver.currentLng ?? 0}
-                          latitude={driver.currentLat ?? 0}
+                          longitude={isActive && activeDriverOrigin ? activeDriverOrigin[0] : (driver.currentLng ?? 0)}
+                          latitude={isActive && activeDriverOrigin ? activeDriverOrigin[1] : (driver.currentLat ?? 0)}
                           anchor="center"
                            onClick={() => setActiveAssignmentId(String(assign.id))}
                         >
